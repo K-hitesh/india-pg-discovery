@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.DS_Store
+# Do not commit large incoming licensed exports by default.
+data/incoming/*
+!data/incoming/.gitkeep

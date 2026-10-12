@@ -1,0 +1,59 @@
+name: India PG Discovery
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 2 * * 1' # Mondays 02:17 UTC; adjust after observing source load and coverage.
+
+permissions:
+  contents: write
+
+concurrency:
+  group: india-pg-discovery
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Discover PG-like listings
+        env:
+          PG_USER_AGENT: IndiaPGDiscovery/1.0 (GitHub Actions; contact: replace-with-your-email@example.com)
+        run: python -u src/pg_scraper.py
+
+      - name: Upload CSV and database snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: india-pg-discovery-${{ github.run_number }}
+          path: |
+            data/pgs.csv
+            data/pgs.sqlite
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Persist database and CSV in repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/pgs.sqlite data/pgs.csv
+          if git diff --cached --quiet; then
+            echo "No database/CSV changes to commit."
+          else
+            git commit -m "Update PG discovery dataset [skip ci]"
+            git push origin HEAD:main
+          fi
