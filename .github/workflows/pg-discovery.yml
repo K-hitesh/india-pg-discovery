@@ -16,33 +16,39 @@ jobs:
   discover:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: requirements.txt
-
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
-
       - name: Run PG discovery
         env:
-          PG_USER_AGENT: "IndiaPGDiscovery/1.0 (contact: YOUR_EMAIL@example.com)"
+          PG_USER_AGENT: "IndiaPGDiscovery/1.2 (contact: YOUR_EMAIL@example.com)"
+          PG_TARGET_LISTINGS: "1000"
+          CITY_DELAY_SECONDS: "3"
+          OVERPASS_RETRIES: "2"
         run: python src/pg_scraper.py
-
-      - name: Upload collected data
+      - name: Commit results if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/pgs.csv data/pgs.sqlite
+          git diff --cached --quiet || git commit -m "Update PG discovery data"
+          git push
+        continue-on-error: true
+      - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pg-discovery-results
+          name: india-pg-discovery-results
           path: |
             data/pgs.csv
             data/pgs.sqlite
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 30
