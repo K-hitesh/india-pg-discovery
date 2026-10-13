@@ -521,6 +521,12 @@ def main() -> int:
         imported = import_authorized_csv(con)
         con.commit()
         total = export_csv(con)
+        target = int(os.getenv("PG_TARGET_LISTINGS", "1000"))
+        city_counts = con.execute(
+            "SELECT COALESCE(city, 'Unknown'), COUNT(*) FROM pgs GROUP BY COALESCE(city, 'Unknown') ORDER BY COUNT(*) DESC"
+        ).fetchall()
+        print(f"TARGET CHECK: {total}/{target} unique records; target_met={total >= target}")
+        print("LISTINGS BY CITY: " + json.dumps(city_counts, ensure_ascii=False))
         print(
             f"Run complete. PG-like records observed this run: {new_seen}; "
             f"authorized CSV rows processed: {imported}; "
