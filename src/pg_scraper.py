@@ -1,21 +1,46 @@
 from __future__ import annotations
-import csv, json, os, re, sqlite3, sys, time
+
+import csv
+import json
+import os
+import re
+import sqlite3
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
 import requests
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
-DB_PATH = Path(os.getenv("PG_DB_PATH", DATA / "pgs.sqlite"))
-CSV_PATH = Path(os.getenv("PG_CSV_PATH", DATA / "pgs.csv"))
+DB_PATH = Path(os.getenv("PG_DB_PATH", str(DATA / "pgs.sqlite")))
+CSV_PATH = Path(os.getenv("PG_CSV_PATH", str(DATA / "pgs.csv")))
 CITIES_PATH = ROOT / "cities.json"
-USER_AGENT = os.getenv("PG_USER_AGENT", "IndiaPGDiscovery/1.0 (research project; contact: set PG_USER_AGENT to your contact email)")
+
+USER_AGENT = os.getenv(
+    "PG_USER_AGENT",
+    "IndiaPGDiscovery/1.1 (contact: replace-with-your-email@example.com)",
+)
 OVERPASS_ENDPOINTS = [
-    x.strip() for x in os.getenv("OVERPASS_ENDPOINTS", "https://overpass-api.de/api/interpreter,https://overpass.kumi.systems/api/interpreter").split(",") if x.strip()
+    item.strip()
+    for item in os.getenv(
+        "OVERPASS_ENDPOINTS",
+        "https://overpass-api.de/api/interpreter,"
+        "https://overpass.kumi.systems/api/interpreter,"
+        "https://overpass.private.coffee/api/interpreter",
+    ).split(",")
+    if item.strip()
 ]
+REQUEST_TIMEOUT = int(os.getenv("OVERPASS_TIMEOUT_SECONDS", "60"))
+MAX_ATTEMPTS_PER_ENDPOINT = int(os.getenv("OVERPASS_RETRIES", "2"))
+CITY_DELAY_SECONDS = float(os.getenv("CITY_DELAY_SECONDS", "3"))
+
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": USER_AGENT, "Accept": "application/json"})
+SESSION.headers.update(
+    {"User-Agent": USER_AGENT, "Accept": "application/json"}
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS pgs (
@@ -56,11 +81,23 @@ CREATE INDEX IF NOT EXISTS idx_pgs_city ON pgs(city);
 CREATE INDEX IF NOT EXISTS idx_pgs_name ON pgs(name);
 """
 
-COLUMNS = ["id","source","source_id","name","address","locality","city","state","postcode","latitude","longitude","phone","email","website","monthly_rent","room_type","amenities","photo_urls","nearby_locations","source_url","first_seen","last_seen"]
+COLUMNS = [
+    "id", "source", "source_id", "name", "address", "locality", "city",
+    "state", "postcode", "latitude", "longitude", "phone", "email",
+    "website", "monthly_rent", "room_type", "amenities", "photo_urls",
+    "nearby_locations", "source_url", "first_seen", "last_seen",
+]
 
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def clean(value: Any) -> str | None:
+    if value is None:
+        return None
+    value = re.sub(r"\s+", " ", str(value)).strip()
+    return value or None
 
 
 def connect() -> sqlite3.Connection:
@@ -72,245 +109,431 @@ def connect() -> sqlite3.Connection:
     return con
 
 
-def clean(value: Any) -> str | None:
-    if value is None:
-        return None
-    value = re.sub(r"\s+", " ", str(value)).strip()
-    return value or None
-
-
 def choose(tags: dict, *keys: str) -> str | None:
     for key in keys:
-        val = clean(tags.get(key))
-        if val:
-            return val
+        value = clean(tags.get(key))
+        if value:
+            return value
     return None
 
 
 def looks_like_pg(tags: dict) -> bool:
     name = (tags.get("name") or "").lower()
-    # OSM tagging is inconsistent: hostel tags are included; name matching catches some PGs.
-    return (tags.get("amenity") == "hostel" or tags.get("tourism") == "hostel"
-            or tags.get("building") == "hostel"
-            or bool(re.search(r"\b(pg|paying guest|paying-guest|co.?living|hostel|ladies hostel|mens hostel)\b", name)))
+    return (
+        tags.get("amenity") == "hostel"
+        or tags.get("tourism") == "hostel"
+        or tags.get("building") == "hostel"
+        or bool(
+            re.search(
+                r"\b(pg|paying guest|paying-guest|co.?living|hostel|"
+                r"ladies hostel|mens hostel|women hostel|gents hostel)\b",
+                name,
+            )
+        )
+    )
 
 
 def address_from_tags(tags: dict) -> str | None:
-    parts = [tags.get(k) for k in ("addr:housenumber", "addr:street", "addr:suburb", "addr:neighbourhood", "addr:city", "addr:district", "addr:state", "addr:postcode")]
-    parts = [clean(x) for x in parts if clean(x)]
+    keys = (
+        "addr:housenumber", "addr:street", "addr:suburb",
+        "addr:neighbourhood", "addr:city", "addr:district",
+        "addr:state", "addr:postcode",
+    )
+    parts = [clean(tags.get(key)) for key in keys]
+    parts = [part for part in parts if part]
     return ", ".join(dict.fromkeys(parts)) or None
 
 
-def get_city_data(city: dict) -> list[dict]:
-    """Query OSM's Overpass API once per city; no systematic public Nominatim geocoding."""
-    aliases = [re.escape(a) for a in city["aliases"]]
-    alias_regex = "|".join(aliases)
-    # City boundary may be named either the city or a known alias. Query localities and PG-like POIs
-    # within the matching administrative area. Data coverage depends on OSM tagging completeness.
-    query = f'''[out:json][timeout:90];
-    area["name"~"^({alias_regex})$",i]["boundary"="administrative"]->.cityArea;
-    (
-      nwr(area.cityArea)["amenity"="hostel"];
-      nwr(area.cityArea)["tourism"="hostel"];
-      nwr(area.cityArea)["building"="hostel"];
-      nwr(area.cityArea)["name"~"\\b(PG|paying guest|paying-guest|co.?living|hostel|ladies hostel|mens hostel)\\b",i];
-      node(area.cityArea)["place"~"^(suburb|neighbourhood|quarter|district)$"];
-      way(area.cityArea)["place"~"^(suburb|neighbourhood|quarter|district)$"];
-      relation(area.cityArea)["place"~"^(suburb|neighbourhood|quarter|district)$"];
-      nwr(area.cityArea)["amenity"~"^(hospital|clinic|university|college|school|marketplace|bus_station)$"];
-      nwr(area.cityArea)["railway"~"^(station|halt|subway_entrance)$"];
-      nwr(area.cityArea)["public_transport"="station"];
-      nwr(area.cityArea)["shop"="supermarket"];
-    ); out center tags;'''
-    last_error = None
+def safe_alias_regex(city: dict) -> str:
+    aliases = city.get("aliases") or [city["name"]]
+    escaped = [re.escape(str(alias)) for alias in aliases if clean(alias)]
+    return "|".join(escaped) or re.escape(city["name"])
+
+
+def build_query(city: dict, include_pois: bool = False) -> str:
+    """
+    Query one matching administrative area. PG discovery and nearby-POI
+    discovery are separate so the first request is smaller.
+    """
+    alias_regex = safe_alias_regex(city)
+    lines = [
+        "[out:json][timeout:45];",
+        f'area["name"~"^({alias_regex})$",i]["boundary"="administrative"]->.cityArea;',
+        "(",
+        '  nwr(area.cityArea)["amenity"="hostel"];',
+        '  nwr(area.cityArea)["tourism"="hostel"];',
+        '  nwr(area.cityArea)["building"="hostel"];',
+        r'  nwr(area.cityArea)["name"~"\b(PG|paying guest|paying-guest|co.?living|hostel|ladies hostel|mens hostel|women hostel|gents hostel)\b",i];',
+    ]
+    if include_pois:
+        lines.extend([
+            '  nwr(area.cityArea)["amenity"~"^(hospital|clinic|university|college|school|marketplace|bus_station)$"];',
+            '  nwr(area.cityArea)["railway"~"^(station|halt|subway_entrance)$"];',
+            '  nwr(area.cityArea)["public_transport"="station"];',
+            '  nwr(area.cityArea)["shop"="supermarket"];',
+        ])
+    lines.extend([");", "out center tags;"])
+    return "\n".join(lines)
+
+
+def overpass_request(query: str, label: str) -> dict:
+    """Try configured public Overpass instances with bounded retries."""
+    errors: list[str] = []
     for endpoint in OVERPASS_ENDPOINTS:
-        try:
-            response = SESSION.post(endpoint, data={"data": query}, timeout=(15, 110))
-            if response.status_code in (429, 502, 503, 504):
-                last_error = RuntimeError(f"Overpass HTTP {response.status_code} at {endpoint}")
-                time.sleep(3)
-                continue
-            response.raise_for_status()
-            payload = response.json()
-            return payload.get("elements", [])
-        except Exception as exc:
-            last_error = exc
-            time.sleep(2)
-    raise RuntimeError(str(last_error or "No Overpass endpoint succeeded"))
+        for attempt in range(1, MAX_ATTEMPTS_PER_ENDPOINT + 1):
+            try:
+                response = SESSION.post(
+                    endpoint,
+                    data={"data": query},
+                    timeout=(15, REQUEST_TIMEOUT),
+                )
+                if response.status_code in (429, 500, 502, 503, 504):
+                    errors.append(
+                        f"{endpoint} HTTP {response.status_code} "
+                        f"(attempt {attempt}/{MAX_ATTEMPTS_PER_ENDPOINT})"
+                    )
+                    # Respect Retry-After when supplied; cap the wait.
+                    retry_after = response.headers.get("Retry-After")
+                    try:
+                        wait = min(20, max(2, int(retry_after))) if retry_after else 2 * attempt
+                    except ValueError:
+                        wait = 2 * attempt
+                    time.sleep(wait)
+                    continue
+                response.raise_for_status()
+                payload = response.json()
+                elements = payload.get("elements")
+                if not isinstance(elements, list):
+                    raise ValueError("Overpass response did not contain an elements list")
+                return payload
+            except (requests.RequestException, ValueError) as exc:
+                errors.append(f"{endpoint} {type(exc).__name__}: {str(exc)[:180]}")
+                time.sleep(min(5, attempt * 2))
+    raise RuntimeError(f"{label}: all Overpass endpoints failed. " + " | ".join(errors[-8:]))
+
+
+def get_city_data(city: dict) -> tuple[list[dict], str]:
+    """Return PG-like elements and diagnostic information for one city."""
+    query = build_query(city, include_pois=False)
+    payload = overpass_request(query, f"{city['name']} PG query")
+    elements = payload.get("elements", [])
+    area_count = sum(1 for element in elements if element.get("type") == "area")
+    note = (
+        f"pg_query_elements={len(elements)}; "
+        f"area_objects_returned={area_count}; "
+        f"generator={payload.get('generator', 'unknown')}"
+    )
+    return elements, note
+
+
+def get_city_pois(city: dict) -> tuple[list[dict], str]:
+    """Optional separate query for nearby places; failure does not discard PGs."""
+    query = build_query(city, include_pois=True)
+    payload = overpass_request(query, f"{city['name']} nearby-places query")
+    return payload.get("elements", []), f"poi_query_elements={len(payload.get('elements', []))}"
 
 
 def normalize_osm(el: dict, city_name: str) -> dict | None:
     tags = el.get("tags") or {}
-    is_pg = looks_like_pg(tags)
-    is_locality = tags.get("place") in {"suburb", "neighbourhood", "quarter", "district"}
-    poi_category = None
-    if tags.get("amenity") in {"hospital", "clinic", "university", "college", "school", "marketplace", "bus_station"}:
-        poi_category = tags.get("amenity")
-    elif tags.get("railway") in {"station", "halt", "subway_entrance"}:
-        poi_category = "railway_" + tags.get("railway")
-    elif tags.get("public_transport") == "station":
-        poi_category = "public_transport_station"
-    elif tags.get("shop") == "supermarket":
-        poi_category = "supermarket"
-    if not (is_pg or is_locality or poi_category):
+    if not looks_like_pg(tags):
         return None
+
     lat = el.get("lat")
     lon = el.get("lon")
     if lat is None or lon is None:
         center = el.get("center") or {}
         lat, lon = center.get("lat"), center.get("lon")
-    # Locality and POI objects enrich nearby-location fields but are not stored as PG properties.
-    if is_locality:
-        return {"kind": "locality", "name": clean(tags.get("name")), "city": city_name,
-                "latitude": lat, "longitude": lon, "source_id": f"{el.get('type')}/{el.get('id')}"}
-    if poi_category:
-        return {"kind": "poi", "name": clean(tags.get("name")), "category": poi_category, "city": city_name,
-                "latitude": lat, "longitude": lon, "source_id": f"{el.get('type')}/{el.get('id')}"}
+
     source_id = f"{el.get('type')}/{el.get('id')}"
     image = choose(tags, "image", "wikimedia_commons")
     photo_urls = [image] if image else []
-    amenities = sorted(k.removeprefix("amenity:") for k, v in tags.items() if k.startswith("amenity:") and v == "yes")
-    # Keep only explicit, source-provided photo references. Do not download/rehost image files.
-    return {"kind": "pg", "id": f"osm:{source_id}", "source": "openstreetmap", "source_id": source_id,
-        "name": choose(tags, "name", "official_name", "operator"), "address": address_from_tags(tags),
-        "locality": choose(tags, "addr:suburb", "addr:neighbourhood", "addr:quarter", "addr:district"),
-        "city": choose(tags, "addr:city") or city_name, "state": choose(tags, "addr:state"),
-        "postcode": choose(tags, "addr:postcode"), "latitude": lat, "longitude": lon,
-        "phone": choose(tags, "contact:phone", "phone"), "email": choose(tags, "contact:email", "email"),
-        "website": choose(tags, "contact:website", "website"), "monthly_rent": choose(tags, "charge", "fee"),
-        "room_type": choose(tags, "rooms", "capacity", "beds"), "amenities": json.dumps(amenities),
-        "photo_urls": json.dumps(photo_urls), "nearby_locations": json.dumps([]),
+    amenities = sorted(
+        key.removeprefix("amenity:")
+        for key, value in tags.items()
+        if key.startswith("amenity:") and value == "yes"
+    )
+
+    return {
+        "kind": "pg",
+        "id": f"osm:{source_id}",
+        "source": "openstreetmap",
+        "source_id": source_id,
+        "name": choose(tags, "name", "official_name", "operator"),
+        "address": address_from_tags(tags),
+        "locality": choose(
+            tags, "addr:suburb", "addr:neighbourhood",
+            "addr:quarter", "addr:district",
+        ),
+        "city": choose(tags, "addr:city") or city_name,
+        "state": choose(tags, "addr:state"),
+        "postcode": choose(tags, "addr:postcode"),
+        "latitude": lat,
+        "longitude": lon,
+        "phone": choose(tags, "contact:phone", "phone"),
+        "email": choose(tags, "contact:email", "email"),
+        "website": choose(tags, "contact:website", "website"),
+        "monthly_rent": choose(tags, "charge", "fee"),
+        "room_type": choose(tags, "rooms", "capacity", "beds"),
+        "amenities": json.dumps(amenities),
+        "photo_urls": json.dumps(photo_urls),
+        "nearby_locations": json.dumps([]),
         "source_url": f"https://www.openstreetmap.org/{el.get('type')}/{el.get('id')}",
-        "raw_tags": json.dumps(tags, ensure_ascii=False)}
+        "raw_tags": json.dumps(tags, ensure_ascii=False),
+    }
 
 
 def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     from math import asin, cos, radians, sin, sqrt
-    dlat, dlon = radians(lat2-lat1), radians(lon2-lon1)
-    a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
+    dlat, dlon = radians(lat2 - lat1), radians(lon2 - lon1)
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
     return 6371 * 2 * asin(sqrt(min(1, a)))
+
+
+def normalize_poi(el: dict, city_name: str) -> dict | None:
+    tags = el.get("tags") or {}
+    category = None
+    if tags.get("amenity") in {
+        "hospital", "clinic", "university", "college", "school",
+        "marketplace", "bus_station",
+    }:
+        category = tags["amenity"]
+    elif tags.get("railway") in {"station", "halt", "subway_entrance"}:
+        category = "railway_" + tags["railway"]
+    elif tags.get("public_transport") == "station":
+        category = "public_transport_station"
+    elif tags.get("shop") == "supermarket":
+        category = "supermarket"
+    if not category:
+        return None
+
+    lat, lon = el.get("lat"), el.get("lon")
+    if lat is None or lon is None:
+        center = el.get("center") or {}
+        lat, lon = center.get("lat"), center.get("lon")
+    if lat is None or lon is None or not tags.get("name"):
+        return None
+    return {
+        "name": clean(tags.get("name")),
+        "category": category,
+        "city": city_name,
+        "latitude": lat,
+        "longitude": lon,
+    }
+
+
+def attach_nearby_locations(pg_rows: list[dict], poi_rows: list[dict]) -> None:
+    for row in pg_rows:
+        if row.get("latitude") is None or row.get("longitude") is None:
+            continue
+        candidates = []
+        for poi in poi_rows:
+            km = distance_km(
+                float(row["latitude"]), float(row["longitude"]),
+                float(poi["latitude"]), float(poi["longitude"]),
+            )
+            if km <= 2:
+                candidates.append({
+                    "name": poi["name"],
+                    "type": poi["category"],
+                    "distance_km": round(km, 2),
+                    "source": "OpenStreetMap",
+                })
+        candidates.sort(key=lambda item: item["distance_km"])
+        row["nearby_locations"] = json.dumps(candidates[:5], ensure_ascii=False)
 
 
 def upsert_pg(con: sqlite3.Connection, row: dict) -> None:
     timestamp = now()
-    old = con.execute("SELECT first_seen FROM pgs WHERE source=? AND source_id=?", (row["source"], row["source_id"])).fetchone()
-    first_seen = old[0] if old else timestamp
-    values = {col: row.get(col) for col in COLUMNS}
-    values["first_seen"] = first_seen
+    old = con.execute(
+        "SELECT first_seen FROM pgs WHERE source=? AND source_id=?",
+        (row["source"], row["source_id"]),
+    ).fetchone()
+    values = {column: row.get(column) for column in COLUMNS}
+    values["first_seen"] = old[0] if old else timestamp
     values["last_seen"] = timestamp
-    cols = COLUMNS + ["raw_tags"]
     values["raw_tags"] = row.get("raw_tags")
-    placeholders = ",".join("?" for _ in cols)
-    updates = ",".join(f"{c}=excluded.{c}" for c in cols if c not in ("id", "source", "source_id", "first_seen"))
-    con.execute(f"INSERT INTO pgs ({','.join(cols)}) VALUES ({placeholders}) ON CONFLICT(source,source_id) DO UPDATE SET {updates}, last_seen=excluded.last_seen",
-                [values.get(c) for c in cols])
+    columns = COLUMNS + ["raw_tags"]
+    placeholders = ",".join("?" for _ in columns)
+    updates = ",".join(
+        f"{column}=excluded.{column}"
+        for column in columns
+        if column not in ("id", "source", "source_id", "first_seen")
+    )
+    con.execute(
+        f"INSERT INTO pgs ({','.join(columns)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(source,source_id) DO UPDATE SET {updates}, "
+        "last_seen=excluded.last_seen",
+        [values.get(column) for column in columns],
+    )
 
 
 def import_authorized_csv(con: sqlite3.Connection) -> int:
-    """Optional connector for licensed/authorized directory exports in data/incoming/*.csv.
-    Expected headers are flexible; source URL and a stable source ID are strongly recommended.
-    """
+    """Import licensed/authorized CSV exports placed in data/incoming/*.csv."""
     incoming = DATA / "incoming"
     if not incoming.exists():
         return 0
+
     count = 0
-    aliases = {"property_name":"name", "pg_name":"name", "address_full":"address", "phone_number":"phone", "contact":"phone", "lat":"latitude", "lon":"longitude", "lng":"longitude", "url":"source_url", "image_url":"photo_urls", "rent":"monthly_rent"}
+    aliases = {
+        "property_name": "name", "pg_name": "name",
+        "address_full": "address", "phone_number": "phone",
+        "contact": "phone", "lat": "latitude", "lon": "longitude",
+        "lng": "longitude", "url": "source_url", "image_url": "photo_urls",
+        "rent": "monthly_rent",
+    }
     for file in incoming.glob("*.csv"):
-        with file.open("r", encoding="utf-8-sig", newline="") as fh:
-            for raw in csv.DictReader(fh):
-                raw = {aliases.get(k.strip().lower(), k.strip().lower()): v for k, v in raw.items()}
+        with file.open("r", encoding="utf-8-sig", newline="") as handle:
+            for raw in csv.DictReader(handle):
+                raw = {
+                    aliases.get(key.strip().lower(), key.strip().lower()): value
+                    for key, value in raw.items()
+                }
                 name = clean(raw.get("name"))
                 if not name:
                     continue
                 source = clean(raw.get("source")) or f"authorized_csv:{file.stem}"
-                source_id = clean(raw.get("source_id")) or clean(raw.get("source_url")) or re.sub(r"\W+", "-", name.lower()).strip("-")
-                stable_id = f"{source}:{source_id}"
+                source_id = (
+                    clean(raw.get("source_id"))
+                    or clean(raw.get("source_url"))
+                    or re.sub(r"\W+", "-", name.lower()).strip("-")
+                )
                 photos = raw.get("photo_urls")
                 if photos and not photos.startswith("["):
                     photos = json.dumps([photos])
-                row = {"id": stable_id, "source": source, "source_id": source_id, "name": name,
-                       "address": clean(raw.get("address")), "locality": clean(raw.get("locality")),
-                       "city": clean(raw.get("city")), "state": clean(raw.get("state")), "postcode": clean(raw.get("postcode")),
-                       "latitude": float(raw["latitude"]) if clean(raw.get("latitude")) else None,
-                       "longitude": float(raw["longitude"]) if clean(raw.get("longitude")) else None,
-                       "phone": clean(raw.get("phone")), "email": clean(raw.get("email")), "website": clean(raw.get("website")),
-                       "monthly_rent": clean(raw.get("monthly_rent")), "room_type": clean(raw.get("room_type")),
-                       "amenities": raw.get("amenities") or "[]", "photo_urls": photos or "[]", "nearby_locations": raw.get("nearby_locations") or "[]",
-                       "source_url": clean(raw.get("source_url")), "raw_tags": json.dumps(raw, ensure_ascii=False)}
+                try:
+                    latitude = float(raw["latitude"]) if clean(raw.get("latitude")) else None
+                    longitude = float(raw["longitude"]) if clean(raw.get("longitude")) else None
+                except ValueError:
+                    latitude, longitude = None, None
+
+                row = {
+                    "id": f"{source}:{source_id}", "source": source,
+                    "source_id": source_id, "name": name,
+                    "address": clean(raw.get("address")),
+                    "locality": clean(raw.get("locality")),
+                    "city": clean(raw.get("city")), "state": clean(raw.get("state")),
+                    "postcode": clean(raw.get("postcode")),
+                    "latitude": latitude, "longitude": longitude,
+                    "phone": clean(raw.get("phone")), "email": clean(raw.get("email")),
+                    "website": clean(raw.get("website")),
+                    "monthly_rent": clean(raw.get("monthly_rent")),
+                    "room_type": clean(raw.get("room_type")),
+                    "amenities": raw.get("amenities") or "[]",
+                    "photo_urls": photos or "[]",
+                    "nearby_locations": raw.get("nearby_locations") or "[]",
+                    "source_url": clean(raw.get("source_url")),
+                    "raw_tags": json.dumps(raw, ensure_ascii=False),
+                }
                 upsert_pg(con, row)
                 count += 1
     return count
 
 
 def export_csv(con: sqlite3.Connection) -> int:
-    rows = con.execute(f"SELECT {','.join(COLUMNS)} FROM pgs ORDER BY city, name").fetchall()
+    rows = con.execute(
+        f"SELECT {','.join(COLUMNS)} FROM pgs ORDER BY city, name"
+    ).fetchall()
     CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with CSV_PATH.open("w", encoding="utf-8-sig", newline="") as fh:
-        writer = csv.writer(fh)
+    with CSV_PATH.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
         writer.writerow(COLUMNS)
         writer.writerows(rows)
     return len(rows)
+
+
+def record_scan(
+    con: sqlite3.Connection, city: str, started: str,
+    status: str, discovered: int, message: str,
+) -> None:
+    con.execute(
+        "INSERT INTO scan_log(city,started_at,status,discovered,message) "
+        "VALUES(?,?,?,?,?)",
+        (city, started, status, discovered, message[:1000]),
+    )
+    con.commit()
 
 
 def main() -> int:
     DATA.mkdir(parents=True, exist_ok=True)
     cities = json.loads(CITIES_PATH.read_text(encoding="utf-8"))
     con = connect()
-    pg_total = 0
+    new_seen = 0
     errors = 0
-    for idx, city in enumerate(cities, start=1):
+    empty_cities = 0
+
+    print(f"Starting PG discovery for {len(cities)} configured city seeds.")
+    print(f"Overpass endpoints configured: {len(OVERPASS_ENDPOINTS)}")
+    print("Note: results only include PG-like records present in OpenStreetMap.")
+
+    for index, city in enumerate(cities, start=1):
+        city_name = city.get("name", f"city-{index}")
         started = now()
         try:
-            elements = get_city_data(city)
-            pg_count = 0
-            locality_count = 0
+            elements, pg_note = get_city_data(city)
             pg_rows = []
-            nearby_points = []
-            for el in elements:
-                row = normalize_osm(el, city["name"])
-                if not row:
-                    continue
-                if row.get("kind") == "locality":
-                    locality_count += 1
-                    continue
-                if row.get("kind") == "poi":
-                    if row.get("latitude") is not None and row.get("longitude") is not None and row.get("name"):
-                        nearby_points.append(row)
-                    continue
-                pg_rows.append(row)
+            for element in elements:
+                row = normalize_osm(element, city_name)
+                if row:
+                    pg_rows.append(row)
+
+            # Nearby-place lookup is optional. A failure here must not discard PG results.
+            poi_note = "nearby lookup skipped"
+            try:
+                poi_elements, poi_note = get_city_pois(city)
+                poi_rows = [
+                    poi for element in poi_elements
+                    if (poi := normalize_poi(element, city_name)) is not None
+                ]
+                attach_nearby_locations(pg_rows, poi_rows)
+                poi_note += f"; nearby_pois={len(poi_rows)}"
+            except Exception as poi_exc:
+                poi_note = f"nearby lookup failed: {str(poi_exc)[:250]}"
+                print(f"  WARNING {city_name}: {poi_note}", file=sys.stderr)
+
             for row in pg_rows:
-                if row.get("latitude") is not None and row.get("longitude") is not None:
-                    candidates = []
-                    for poi in nearby_points:
-                        km = distance_km(float(row["latitude"]), float(row["longitude"]), float(poi["latitude"]), float(poi["longitude"]))
-                        if km <= 2.0:
-                            candidates.append({"name": poi["name"], "type": poi["category"], "distance_km": round(km, 2), "source": "OpenStreetMap"})
-                    candidates.sort(key=lambda x: x["distance_km"])
-                    row["nearby_locations"] = json.dumps(candidates[:5], ensure_ascii=False)
                 upsert_pg(con, row)
-                pg_count += 1
-            con.execute("INSERT INTO scan_log(city,started_at,status,discovered,message) VALUES(?,?,?,?,?)",
-                        (city["name"], started, "ok", pg_count, f"localities_seen={locality_count}; nearby_pois={len(nearby_points)}; elements={len(elements)}"))
             con.commit()
-            pg_total += pg_count
-            print(f"[{idx}/{len(cities)}] {city['name']}: {pg_count} PG-like records; {locality_count} locality objects")
+
+            if not pg_rows:
+                empty_cities += 1
+                status = "empty"
+            else:
+                status = "ok"
+
+            message = (
+                f"{pg_note}; pg_like_records={len(pg_rows)}; {poi_note}; "
+                "source=OpenStreetMap"
+            )
+            record_scan(con, city_name, started, status, len(pg_rows), message)
+            new_seen += len(pg_rows)
+            print(f"[{index}/{len(cities)}] {city_name}: {len(pg_rows)} PG-like records. {message}")
+
         except Exception as exc:
             errors += 1
-            con.execute("INSERT INTO scan_log(city,started_at,status,discovered,message) VALUES(?,?,?,?,?)",
-                        (city["name"], started, "error", 0, str(exc)[:1000]))
-            con.commit()
-            print(f"[{idx}/{len(cities)}] ERROR {city['name']}: {exc}", file=sys.stderr)
-        # Be polite to shared community infrastructure; the workflow is deliberately sequential.
-        if idx < len(cities):
-            time.sleep(float(os.getenv("CITY_DELAY_SECONDS", "2.5")))
-    imported = import_authorized_csv(con)
-    con.commit()
-    total = export_csv(con)
-    con.close()
-    print(f"Run complete. New/updated OSM PG-like records observed this run: {pg_total}; authorized CSV rows processed: {imported}; unique database records: {total}; city errors: {errors}")
-    print(f"Database: {DB_PATH}; CSV: {CSV_PATH}")
-    # Non-zero only if every city failed; partial results are still valuable and committed.
-    return 1 if errors == len(cities) else 0
+            message = f"{type(exc).__name__}: {str(exc)}"
+            record_scan(con, city_name, started, "error", 0, message)
+            print(f"[{index}/{len(cities)}] ERROR {city_name}: {message}", file=sys.stderr)
+
+        if index < len(cities):
+            time.sleep(CITY_DELAY_SECONDS)
+
+    try:
+        imported = import_authorized_csv(con)
+        con.commit()
+        total = export_csv(con)
+        print(
+            f"Run complete. PG-like records observed this run: {new_seen}; "
+            f"authorized CSV rows processed: {imported}; "
+            f"unique database records: {total}; empty cities: {empty_cities}; "
+            f"city errors: {errors}."
+        )
+        print(f"Database: {DB_PATH}")
+        print(f"CSV: {CSV_PATH}")
+        print("If every city is empty, inspect boundary names/aliases and Overpass responses.")
+        return 1 if errors == len(cities) and cities else 0
+    finally:
+        con.close()
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
