@@ -151,26 +151,63 @@ def safe_alias_regex(city: dict) -> str:
     return "|".join(escaped) or re.escape(city["name"])
 
 
-# Bounded pilot areas for the eight requested metro markets.
-# Values are south, west, north, east. They are approximate collection windows,
-# not official municipal boundaries; records are attributed to the configured city.
-PILOT_BBOXES = {
-    "Bengaluru": (12.80, 77.35, 13.15, 77.80),
-    "Hyderabad": (17.20, 78.25, 17.60, 78.70),
-    "Mumbai": (18.85, 72.75, 19.35, 73.05),
-    "Pune": (18.35, 73.65, 18.70, 74.00),
-    "Chennai": (12.80, 80.05, 13.25, 80.35),
-    "Noida": (28.40, 77.30, 28.65, 77.55),
-    "Delhi": (28.40, 76.85, 28.90, 77.35),
-    "Gurugram": (28.25, 76.85, 28.55, 77.20),
+# Approximate collection windows for every configured city in cities.json.
+# Bounds are south, west, north, east; they are discovery windows, not legal borders.
+CITY_BBOXES = {
+    "Bengaluru": (12.70, 77.30, 13.20, 77.85),
+    "Hyderabad": (17.10, 78.20, 17.65, 78.75),
+    "Chennai": (12.70, 79.95, 13.30, 80.40),
+    "Pune": (18.25, 73.60, 18.80, 74.05),
+    "Mumbai": (18.80, 72.70, 19.40, 73.10),
+    "Delhi": (28.35, 76.80, 28.95, 77.40),
+    "Noida": (28.35, 77.25, 28.70, 77.60),
+    "Gurugram": (28.20, 76.80, 28.60, 77.25),
+    "Mysuru": (12.20, 76.45, 12.45, 76.75),
+    "Kochi": (9.80, 76.15, 10.15, 76.45),
+    "Thiruvananthapuram": (8.35, 76.80, 8.65, 77.00),
+    "Kozhikode": (11.15, 75.70, 11.45, 76.00),
+    "Thrissur": (10.40, 76.10, 10.65, 76.35),
+    "Coimbatore": (10.90, 76.85, 11.15, 77.15),
+    "Visakhapatnam": (17.55, 83.05, 17.90, 83.45),
+    "Vijayawada": (16.40, 80.50, 16.65, 80.75),
+    "Ahmedabad": (22.90, 72.40, 23.20, 72.75),
+    "Jaipur": (26.75, 75.65, 27.05, 76.00),
+    "Kolkata": (22.40, 88.20, 22.70, 88.50),
+    "Indore": (22.60, 75.70, 22.85, 76.00),
+    "Lucknow": (26.70, 80.80, 27.00, 81.10),
+    "Guwahati": (26.05, 91.55, 26.30, 91.85),
+    "Chandigarh": (30.60, 76.65, 30.80, 76.90),
+    "Mohali": (30.55, 76.60, 30.80, 76.85),
+    "Greater Noida": (28.35, 77.40, 28.65, 77.75),
+    "Faridabad": (28.30, 77.20, 28.55, 77.45),
+    "Ghaziabad": (28.55, 77.30, 28.80, 77.55),
+    "Nagpur": (21.00, 78.95, 21.25, 79.20),
+    "Nashik": (19.90, 73.65, 20.10, 73.95),
+    "Surat": (21.05, 72.70, 21.30, 73.00),
+    "Vadodara": (22.20, 73.05, 22.45, 73.30),
+    "Bhopal": (23.10, 77.25, 23.35, 77.55),
+    "Patna": (25.50, 85.05, 25.70, 85.25),
+    "Bhubaneswar": (20.15, 85.70, 20.40, 85.95),
+    "Ranchi": (23.25, 85.20, 23.50, 85.45),
+    "Dehradun": (30.20, 77.90, 30.45, 78.15),
+    "Amritsar": (31.55, 74.75, 31.80, 75.00),
+    "Jalandhar": (31.25, 75.45, 31.55, 75.70),
+    "Mangaluru": (12.75, 74.75, 13.05, 75.05),
+    "Hubballi": (15.25, 75.05, 15.55, 75.35),
+    "Tiruchirappalli": (10.70, 78.55, 10.95, 78.85),
+    "Madurai": (9.80, 78.00, 10.05, 78.25),
+    "Salem": (11.55, 78.05, 11.85, 78.35),
+    "Tirupati": (13.55, 79.30, 13.80, 79.65),
+    "Warangal": (17.90, 79.45, 18.15, 79.75),
+    "Navi Mumbai": (18.90, 72.90, 19.20, 73.15),
+    "Thane": (19.10, 72.90, 19.40, 73.20),
 }
-
 
 def build_query(city: dict, include_pois: bool = False) -> str:
     """Use a bounded bbox query rather than expensive administrative-area lookup."""
-    bbox = PILOT_BBOXES.get(city["name"])
+    bbox = CITY_BBOXES.get(city["name"])
     if bbox is None:
-        raise ValueError(f"No pilot bounding box configured for {city['name']}")
+        raise ValueError(f"No city bounding box configured for {city['name']}")
     bounds = ",".join(str(v) for v in bbox)
     if include_pois:
         return (
@@ -190,7 +227,7 @@ def build_query(city: dict, include_pois: bool = False) -> str:
 
 def build_name_fallback_query(city: dict) -> str:
     """Run only if the exact-tag query succeeds but finds no records."""
-    south, west, north, east = PILOT_BBOXES[city["name"]]
+    south, west, north, east = CITY_BBOXES[city["name"]]
     mid_lat, mid_lon = (south + north) / 2, (west + east) / 2
     boxes = [
         (south, west, mid_lat, mid_lon),
@@ -496,11 +533,11 @@ def record_scan(
 def main() -> int:
     DATA.mkdir(parents=True, exist_ok=True)
     configured_cities = json.loads(CITIES_PATH.read_text(encoding="utf-8"))
-    cities = [city for city in configured_cities if city.get("name") in PILOT_BBOXES]
-    missing = sorted(set(PILOT_BBOXES) - {city.get("name") for city in cities})
+    cities = configured_cities
+    missing = [city.get("name", "?") for city in cities if city.get("name") not in CITY_BBOXES]
     if missing:
-        raise RuntimeError(f"Requested pilot cities missing from cities.json: {missing}")
-    print("METRO PILOT: " + ", ".join(city["name"] for city in cities), flush=True)
+        raise RuntimeError(f"Cities missing discovery bounds: {missing}")
+    print(f"ALL-CITY MODE: scanning all {len(cities)} configured cities.", flush=True)
     con = connect()
     new_seen = 0
     errors = 0
