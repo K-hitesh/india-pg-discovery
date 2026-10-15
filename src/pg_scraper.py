@@ -300,9 +300,11 @@ def normalize_osm(el: dict, city_name: str) -> dict | None:
         "address": address_from_tags(tags),
         "locality": choose(
             tags, "addr:suburb", "addr:neighbourhood",
-            "addr:quarter", "addr:district",
+            "addr:quarter", "addr:district", "addr:city",
         ),
-        "city": choose(tags, "addr:city") or city_name,
+        # Attribute records to the configured scan area. OSM addr:city tags are
+        # frequently inconsistent (e.g. "Mumbai", spelling variants, or districts).
+        "city": city_name,
         "state": choose(tags, "addr:state"),
         "postcode": choose(tags, "addr:postcode"),
         "latitude": lat,
