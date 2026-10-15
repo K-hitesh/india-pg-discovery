@@ -4,7 +4,7 @@ A source-aware PG discovery collector with SQLite deduplication, CSV export, sch
 
 ## Important coverage limit
 
-This is a working starter, not a promise to find every PG in India. OpenStreetMap coverage for paying-guest accommodation is incomplete and tagging is inconsistent. The collector finds OSM objects tagged as hostels or named like PGs/hostels within administrative areas that Overpass can resolve. It also logs locality objects for coverage auditing, but does not automatically query every locality separately (that would put excessive load on shared community infrastructure). To improve coverage, add permitted source connectors or import authorized listings.
+This is a working starter, not a promise to find every PG in India. OpenStreetMap coverage for paying-guest accommodation is incomplete and tagging is inconsistent. The collector scans all 47 configured city windows using approximate bounding boxes, with smaller-tile recovery if a city-wide query times out. It finds OSM objects tagged as hostels or named like PGs/hostels. These windows are approximate discovery areas, not official municipal borders. Coverage remains limited to records present in OpenStreetMap; add permitted source connectors or import authorized listings for better coverage.
 
 ## What it stores
 
