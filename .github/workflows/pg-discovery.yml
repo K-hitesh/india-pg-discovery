@@ -29,10 +29,12 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Run PG discovery
         env:
-          PG_USER_AGENT: "IndiaPGDiscovery/1.2 (contact: YOUR_EMAIL@example.com)"
+          PG_USER_AGENT: "IndiaPGDiscovery/1.2 (+https://github.com/K-hitesh/india-pg-discovery)"
           PG_TARGET_LISTINGS: "1000"
           CITY_DELAY_SECONDS: "3"
-          OVERPASS_RETRIES: "2"
+          OVERPASS_RETRIES: "1"
+          OVERPASS_TIMEOUT_SECONDS: "20"
+          PG_ENRICH_NEARBY: "0"
         run: python src/pg_scraper.py
       - name: Commit results if changed
         run: |
