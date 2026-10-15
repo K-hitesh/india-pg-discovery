@@ -177,14 +177,31 @@ def build_query(city: dict, include_pois: bool = False) -> str:
             f'(nwr["amenity"~"^(hospital|clinic|college|university|marketplace|bus_station)$"]({bounds});'
             f'nwr["railway"~"^(station|halt)$"]({bounds}););out center tags;'
         )
+    # Cheap exact-tag query first; broad name regexes are expensive on metro-sized boxes.
     return (
-        "[out:json][timeout:20];"
+        "[out:json][timeout:15];"
         f'(nwr["amenity"="hostel"]({bounds});'
         f'nwr["tourism"="hostel"]({bounds});'
-        f'nwr["building"="hostel"]({bounds});'
-        f'nwr["name"~"PG|paying guest|hostel|co.?living",i]({bounds}););'
+        f'nwr["building"="hostel"]({bounds}););'
         "out center tags;"
     )
+
+
+def build_name_fallback_query(city: dict) -> str:
+    """Run only if the exact-tag query succeeds but finds no records."""
+    south, west, north, east = PILOT_BBOXES[city["name"]]
+    mid_lat, mid_lon = (south + north) / 2, (west + east) / 2
+    boxes = [
+        (south, west, mid_lat, mid_lon),
+        (south, mid_lon, mid_lat, east),
+        (mid_lat, west, north, mid_lon),
+        (mid_lat, mid_lon, north, east),
+    ]
+    clauses = "".join(
+        f'nwr["name"~"PG|paying guest|hostel|co.?living",i]({",".join(str(v) for v in box)});'
+        for box in boxes
+    )
+    return f"[out:json][timeout:15];({clauses});out center tags;"
 
 
 def overpass_request(query: str, label: str) -> dict:
@@ -226,13 +243,22 @@ def overpass_request(query: str, label: str) -> dict:
 def get_city_data(city: dict) -> tuple[list[dict], str]:
     """Return PG-like elements and diagnostic information for one city."""
     query = build_query(city, include_pois=False)
-    payload = overpass_request(query, f"{city['name']} PG query")
+    payload = overpass_request(query, f"{city['name']} tagged-hostel query")
     elements = payload.get("elements", [])
+    fallback_note = ""
+    if not elements:
+        fallback_payload = overpass_request(
+            build_name_fallback_query(city),
+            f"{city['name']} tiled name-search fallback",
+        )
+        elements = fallback_payload.get("elements", [])
+        payload = fallback_payload
+        fallback_note = "; used tiled name-search fallback"
     area_count = sum(1 for element in elements if element.get("type") == "area")
     note = (
         f"pg_query_elements={len(elements)}; "
         f"area_objects_returned={area_count}; "
-        f"generator={payload.get('generator', 'unknown')}"
+        f"generator={payload.get('generator', 'unknown')}{fallback_note}"
     )
     return elements, note
 
