@@ -466,7 +466,12 @@ def record_scan(
 
 def main() -> int:
     DATA.mkdir(parents=True, exist_ok=True)
-    cities = json.loads(CITIES_PATH.read_text(encoding="utf-8"))
+    configured_cities = json.loads(CITIES_PATH.read_text(encoding="utf-8"))
+    cities = [city for city in configured_cities if city.get("name") in PILOT_BBOXES]
+    missing = sorted(set(PILOT_BBOXES) - {city.get("name") for city in cities})
+    if missing:
+        raise RuntimeError(f"Requested pilot cities missing from cities.json: {missing}")
+    print("METRO PILOT: " + ", ".join(city["name"] for city in cities), flush=True)
     con = connect()
     new_seen = 0
     errors = 0
