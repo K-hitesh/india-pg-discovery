@@ -150,30 +150,41 @@ def safe_alias_regex(city: dict) -> str:
     return "|".join(escaped) or re.escape(city["name"])
 
 
+# Bounded pilot areas for the eight requested metro markets.
+# Values are south, west, north, east. They are approximate collection windows,
+# not official municipal boundaries; records are attributed to the configured city.
+PILOT_BBOXES = {
+    "Bengaluru": (12.80, 77.35, 13.15, 77.80),
+    "Hyderabad": (17.20, 78.25, 17.60, 78.70),
+    "Mumbai": (18.85, 72.75, 19.35, 73.05),
+    "Pune": (18.35, 73.65, 18.70, 74.00),
+    "Chennai": (12.80, 80.05, 13.25, 80.35),
+    "Noida": (28.40, 77.30, 28.65, 77.55),
+    "Delhi": (28.40, 76.85, 28.90, 77.35),
+    "Gurugram": (28.25, 76.85, 28.55, 77.20),
+}
+
+
 def build_query(city: dict, include_pois: bool = False) -> str:
-    """
-    Query one matching administrative area. PG discovery and nearby-POI
-    discovery are separate so the first request is smaller.
-    """
-    alias_regex = safe_alias_regex(city)
-    lines = [
-        "[out:json][timeout:45];",
-        f'area["name"~"^({alias_regex})$",i]["boundary"="administrative"]->.cityArea;',
-        "(",
-        '  nwr(area.cityArea)["amenity"="hostel"];',
-        '  nwr(area.cityArea)["tourism"="hostel"];',
-        '  nwr(area.cityArea)["building"="hostel"];',
-        r'  nwr(area.cityArea)["name"~"\b(PG|paying guest|paying-guest|co.?living|hostel|ladies hostel|mens hostel|women hostel|gents hostel)\b",i];',
-    ]
+    """Use a bounded bbox query rather than expensive administrative-area lookup."""
+    bbox = PILOT_BBOXES.get(city["name"])
+    if bbox is None:
+        raise ValueError(f"No pilot bounding box configured for {city['name']}")
+    bounds = ",".join(str(v) for v in bbox)
     if include_pois:
-        lines.extend([
-            '  nwr(area.cityArea)["amenity"~"^(hospital|clinic|university|college|school|marketplace|bus_station)$"];',
-            '  nwr(area.cityArea)["railway"~"^(station|halt|subway_entrance)$"];',
-            '  nwr(area.cityArea)["public_transport"="station"];',
-            '  nwr(area.cityArea)["shop"="supermarket"];',
-        ])
-    lines.extend([");", "out center tags;"])
-    return "\n".join(lines)
+        return (
+            "[out:json][timeout:20];"
+            f'(nwr["amenity"~"^(hospital|clinic|college|university|marketplace|bus_station)$"]({bounds});'
+            f'nwr["railway"~"^(station|halt)$"]({bounds}););out center tags;'
+        )
+    return (
+        "[out:json][timeout:20];"
+        f'(nwr["amenity"="hostel"]({bounds});'
+        f'nwr["tourism"="hostel"]({bounds});'
+        f'nwr["building"="hostel"]({bounds});'
+        f'nwr["name"~"PG|paying guest|hostel|co.?living",i]({bounds}););'
+        "out center tags;"
+    )
 
 
 def overpass_request(query: str, label: str) -> dict:
