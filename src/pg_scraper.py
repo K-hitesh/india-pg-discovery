@@ -21,7 +21,7 @@ CITIES_PATH = ROOT / "cities.json"
 
 USER_AGENT = os.getenv(
     "PG_USER_AGENT",
-    "IndiaPGDiscovery/1.1 (contact: replace-with-your-email@example.com)",
+    "IndiaPGDiscovery/1.2 (+https://github.com/K-hitesh/india-pg-discovery)",
 )
 OVERPASS_ENDPOINTS = [
     item.strip()
@@ -33,8 +33,8 @@ OVERPASS_ENDPOINTS = [
     ).split(",")
     if item.strip()
 ]
-REQUEST_TIMEOUT = int(os.getenv("OVERPASS_TIMEOUT_SECONDS", "60"))
-MAX_ATTEMPTS_PER_ENDPOINT = int(os.getenv("OVERPASS_RETRIES", "2"))
+REQUEST_TIMEOUT = int(os.getenv("OVERPASS_TIMEOUT_SECONDS", "20"))
+MAX_ATTEMPTS_PER_ENDPOINT = int(os.getenv("OVERPASS_RETRIES", "1"))
 CITY_DELAY_SECONDS = float(os.getenv("CITY_DELAY_SECONDS", "3"))
 
 SESSION = requests.Session()
@@ -476,19 +476,21 @@ def main() -> int:
                 if row:
                     pg_rows.append(row)
 
-            # Nearby-place lookup is optional. A failure here must not discard PG results.
-            poi_note = "nearby lookup skipped"
-            try:
-                poi_elements, poi_note = get_city_pois(city)
-                poi_rows = [
-                    poi for element in poi_elements
-                    if (poi := normalize_poi(element, city_name)) is not None
-                ]
-                attach_nearby_locations(pg_rows, poi_rows)
-                poi_note += f"; nearby_pois={len(poi_rows)}"
-            except Exception as poi_exc:
-                poi_note = f"nearby lookup failed: {str(poi_exc)[:250]}"
-                print(f"  WARNING {city_name}: {poi_note}", file=sys.stderr)
+            # Nearby-POI enrichment doubles Overpass traffic. Keep it opt-in so
+            # the core PG collection can finish within GitHub Actions limits.
+            poi_note = "nearby lookup disabled (set PG_ENRICH_NEARBY=1 to enable)"
+            if os.getenv("PG_ENRICH_NEARBY", "0").strip() == "1":
+                try:
+                    poi_elements, poi_note = get_city_pois(city)
+                    poi_rows = [
+                        poi for element in poi_elements
+                        if (poi := normalize_poi(element, city_name)) is not None
+                    ]
+                    attach_nearby_locations(pg_rows, poi_rows)
+                    poi_note += f"; nearby_pois={len(poi_rows)}"
+                except Exception as poi_exc:
+                    poi_note = f"nearby lookup failed: {str(poi_exc)[:250]}"
+                    print(f"  WARNING {city_name}: {poi_note}", file=sys.stderr)
 
             for row in pg_rows:
                 upsert_pg(con, row)
