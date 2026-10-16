@@ -27,14 +27,13 @@ OVERPASS_ENDPOINTS = [
     item.strip()
     for item in os.getenv(
         "OVERPASS_ENDPOINTS",
-        "https://overpass.nchc.org.tw/api/interpreter,"
         "https://overpass-api.de/api/interpreter,"
-        "https://overpass.kumi.systems/api/interpreter,"
-        "https://overpass.private.coffee/api/interpreter",
+        "https://overpass.private.coffee/api/interpreter,"
+        "https://overpass.kumi.systems/api/interpreter",
     ).split(",")
     if item.strip()
 ]
-REQUEST_TIMEOUT = int(os.getenv("OVERPASS_TIMEOUT_SECONDS", "20"))
+REQUEST_TIMEOUT = int(os.getenv("OVERPASS_TIMEOUT_SECONDS", "10"))
 MAX_ATTEMPTS_PER_ENDPOINT = int(os.getenv("OVERPASS_RETRIES", "1"))
 CITY_DELAY_SECONDS = float(os.getenv("CITY_DELAY_SECONDS", "3"))
 
