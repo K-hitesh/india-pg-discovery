@@ -278,76 +278,32 @@ def overpass_request(query: str, label: str) -> dict:
 
 
 def get_city_data(city: dict) -> tuple[list[dict], str]:
-    """Query the city, then smaller tiles if the metro-wide request times out."""
-    query_notes: list[str] = []
+    """Try the cheap city query, then one fallback request; keep all cities moving."""
+    notes: list[str] = []
     elements: list[dict] = []
     generator = "unknown"
-    used_tiles = False
-
     try:
-        payload = overpass_request(
-            build_query(city, include_pois=False),
-            f"{city['name']} tagged-hostel query",
-        )
+        payload = overpass_request(build_query(city, include_pois=False), f"{city['name']} tagged-hostel query")
         elements = payload.get("elements", [])
         generator = payload.get("generator", "unknown")
     except RuntimeError as exc:
-        query_notes.append(f"wide query failed: {str(exc)[:350]}")
-        used_tiles = True
-        south, west, north, east = CITY_BBOXES[city["name"]]
-        mid_lat, mid_lon = (south + north) / 2, (west + east) / 2
-        tiles = [
-            (south, west, mid_lat, mid_lon),
-            (south, mid_lon, mid_lat, east),
-            (mid_lat, west, north, mid_lon),
-            (mid_lat, mid_lon, north, east),
-        ]
-        for tile_no, (s, w, n, e) in enumerate(tiles, start=1):
-            bounds = f"{s},{w},{n},{e}"
-            tile_query = (
-                "[out:json][timeout:12];"
-                f'(nwr["amenity"="hostel"]({bounds});'
-                f'nwr["tourism"="hostel"]({bounds});'
-                f'nwr["building"="hostel"]({bounds}););out center tags;'
-            )
-            try:
-                tile_payload = overpass_request(
-                    tile_query, f"{city['name']} tile {tile_no}/4"
-                )
-                elements.extend(tile_payload.get("elements", []))
-                generator = tile_payload.get("generator", generator)
-            except RuntimeError as tile_exc:
-                query_notes.append(f"tile {tile_no} failed: {str(tile_exc)[:180]}")
-            time.sleep(max(1.0, CITY_DELAY_SECONDS))
+        notes.append(f"tagged query failed: {str(exc)[:250]}")
 
-    # If the exact tags succeeded but found no hostels, try name matching in
-    # smaller tiles. This fallback is also best-effort; errors are logged.
     if not elements:
         try:
-            fallback_payload = overpass_request(
-                build_name_fallback_query(city),
-                f"{city['name']} tiled name-search fallback",
-            )
-            elements = fallback_payload.get("elements", [])
-            generator = fallback_payload.get("generator", generator)
-            query_notes.append("used name-search fallback")
+            payload = overpass_request(build_name_fallback_query(city), f"{city['name']} name fallback")
+            elements = payload.get("elements", [])
+            generator = payload.get("generator", generator)
+            notes.append("used name-search fallback")
         except RuntimeError as exc:
-            query_notes.append(f"name fallback failed: {str(exc)[:300]}")
+            notes.append(f"name fallback failed: {str(exc)[:250]}")
 
     unique: dict[tuple[str, int], dict] = {}
     for element in elements:
-        key = (str(element.get("type")), int(element.get("id", 0)))
-        unique[key] = element
+        unique[(str(element.get("type")), int(element.get("id", 0)))] = element
     elements = list(unique.values())
-
-    area_count = sum(1 for element in elements if element.get("type") == "area")
-    note = (
-        f"pg_query_elements={len(elements)}; area_objects_returned={area_count}; "
-        f"generator={generator}; tiled_recovery={used_tiles}; "
-        + "; ".join(query_notes)
-    )
+    note = f"pg_query_elements={len(elements)}; generator={generator}; " + "; ".join(notes)
     return elements, note
-
 
 def get_city_pois(city: dict) -> tuple[list[dict], str]:
     """Optional separate query for nearby places; failure does not discard PGs."""
