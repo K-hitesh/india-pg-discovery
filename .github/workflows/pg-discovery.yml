@@ -15,7 +15,7 @@ concurrency:
 jobs:
   discover:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -33,7 +33,7 @@ jobs:
           PG_TARGET_LISTINGS: "1000"
           CITY_DELAY_SECONDS: "3"
           OVERPASS_RETRIES: "1"
-          OVERPASS_TIMEOUT_SECONDS: "20"
+          OVERPASS_TIMEOUT_SECONDS: "10"
           PG_ENRICH_NEARBY: "0"
         run: python src/pg_scraper.py
       - name: Commit results if changed
