@@ -568,6 +568,8 @@ def main() -> int:
     new_seen = 0
     errors = 0
     empty_cities = 0
+    consecutive_source_failures = 0
+    aborted_for_source_outage = False
 
     print(f"Starting PG discovery for {len(cities)} configured city seeds.")
     print(f"Overpass endpoints configured: {len(OVERPASS_ENDPOINTS)}")
@@ -578,6 +580,14 @@ def main() -> int:
         started = now()
         try:
             elements, pg_note = get_city_data(city)
+            query_failed = (
+                "tagged query failed:" in pg_note
+                and "name fallback failed:" in pg_note
+            )
+            if query_failed:
+                consecutive_source_failures += 1
+            else:
+                consecutive_source_failures = 0
             pg_rows = []
             for element in elements:
                 row = normalize_osm(element, city_name)
@@ -618,6 +628,18 @@ def main() -> int:
             new_seen += len(pg_rows)
             print(f"[{index}/{len(cities)}] {city_name}: {len(pg_rows)} PG-like records. {message}")
 
+            if consecutive_source_failures >= 3:
+                aborted_for_source_outage = True
+                print(
+                    "STOPPING EARLY: three consecutive cities failed both Overpass "
+                    "queries. This is a source outage, not evidence that those cities "
+                    "have no PGs. Preserving existing database records; fix the source "
+                    "or retry later.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                break
+
         except Exception as exc:
             errors += 1
             message = f"{type(exc).__name__}: {str(exc)}"
@@ -646,7 +668,7 @@ def main() -> int:
         print(f"Database: {DB_PATH}")
         print(f"CSV: {CSV_PATH}")
         print("If every city is empty, inspect boundary names/aliases and Overpass responses.")
-        return 1 if errors == len(cities) and cities else 0
+        return 1 if aborted_for_source_outage or (errors == len(cities) and cities) else 0
     finally:
         con.close()
 
