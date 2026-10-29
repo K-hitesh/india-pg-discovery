@@ -324,8 +324,27 @@ def normalize_osm(el: dict, city_name: str) -> dict | None:
         lat, lon = center.get("lat"), center.get("lon")
 
     source_id = f"{el.get('type')}/{el.get('id')}"
-    image = choose(tags, "image", "wikimedia_commons")
-    photo_urls = [image] if image else []
+
+    # OSM photo tags are sparse. Support common image-tag variants and turn
+    # Wikimedia Commons file names into usable file URLs; never invent photos.
+    image_values = [
+        choose(tags, "image", "image:0", "contact:image", "photo", "wikimedia_commons:url"),
+    ]
+    commons = choose(tags, "wikimedia_commons")
+    if commons:
+        if commons.startswith(("https://", "http://")):
+            image_values.append(commons)
+        else:
+            from urllib.parse import quote
+            filename = commons.removeprefix("File:").removeprefix("file:")
+            image_values.append(
+                "https://commons.wikimedia.org/wiki/Special:FilePath/"
+                + quote(filename.replace(" ", "_"), safe="/:_()'!,.-")
+            )
+    photo_urls = list(dict.fromkeys(
+        value for value in image_values
+        if value and value.startswith(("https://", "http://"))
+    ))
     amenities = sorted(
         key.removeprefix("amenity:")
         for key, value in tags.items()
